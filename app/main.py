@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .balancer import run_plan
+from .batch import plan_batch_sequence
 from .calibration import predict_single_weight_balancing
 from .compare import compare_plans
 from .weighing import worst_case_u1
@@ -107,6 +108,12 @@ class VibrationCalibrationRequest(BaseModel):
     # 若干可用单枚配重质量(g), 逐个空槽枚举预测; 空列表由 pydantic 拒绝,
     # 每项必须 > 0 且有限由校准逻辑校验
     available_masses: list[float] = Field(min_length=1)
+
+
+class BatchSequenceRequest(BaseModel):
+    # 参与批次换装的已保存方案 ID(2~10 条, 每条至多出现一次);
+    # 执行次序由服务端精确优化, 与传入顺序无关
+    plan_ids: list[int] = Field(min_length=2, max_length=10)
 
 
 class PlanRequest(BaseModel):
@@ -300,6 +307,24 @@ def compare_saved_plans(a: int, b: int) -> dict[str, Any]:
     plan_a = _row_to_plan(_load_plan_row(a))
     plan_b = _row_to_plan(_load_plan_row(b))
     return compare_plans(plan_a, plan_b)
+
+
+@app.post("/api/plans/batch-sequence")
+def batch_sequence(req: BatchSequenceRequest) -> dict[str, Any]:
+    """批次换装顺序规划(只读): 以空转子为起点, 精确求总操作数最少的执行次序。
+
+    仅接受转子几何(半径、逐槽角度与启用状态)完全相同的方案; 同编号试管在
+    各方案中的质量必须一致, 否则拒绝(400)。每次切换先卸下所有不在下一方案
+    原槽位的试管, 再装入下一方案所需试管, 卸下/装入各计一次操作。用
+    Held-Karp 子集动态规划精确求最小总操作数, 同成本按方案 ID 序列升序
+    裁决; 逐批返回卸装清单、单次与累计操作数。结果不保存、不修改原方案。
+    """
+    # 逐条取数, 保证不存在的方案各自返回准确的 404
+    plans = [_row_to_plan(_load_plan_row(pid)) for pid in req.plan_ids]
+    try:
+        return plan_batch_sequence(plans)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.delete("/api/plan/{plan_id}")

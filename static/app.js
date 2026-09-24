@@ -439,17 +439,18 @@ $("btnCopy").onclick = async () => {
 // ---------------------------------------------------------------------------
 const historySel = new Set();
 
-function syncCompareButton() {
-  const btn = $("btnCompare");
-  btn.disabled = historySel.size !== 2;
-  $("compareHint").textContent = historySel.size === 0
-    ? "勾选两条方案后可并排比较摆放明细与不平衡量。"
-    : `已选 ${historySel.size} 条(需恰好 2 条)。`;
+function syncHistoryButtons() {
+  const n = historySel.size;
+  $("btnCompare").disabled = n !== 2;
+  $("btnBatch").disabled = n < 2 || n > 10;
+  $("compareHint").textContent = n === 0
+    ? "勾选 2 条可并排比较; 勾选 2~10 条可规划批次换装顺序。"
+    : `已选 ${n} 条(比较需恰好 2 条; 批次换装需 2~10 条)。`;
 }
 
 $("btnHistory").onclick = async () => {
   historySel.clear();
-  syncCompareButton();
+  syncHistoryButtons();
   $("historyDialog").classList.add("open");
   await renderHistory();
 };
@@ -476,6 +477,7 @@ async function renderHistory() {
       <div class="rowline">
         <button class="iconbtn" data-a="load">载入</button>
         <button class="iconbtn" data-a="weigh">误差校核</button>
+        <button class="iconbtn" data-a="calib">振动校准</button>
         <button class="iconbtn" data-a="export">导出</button>
         <button class="iconbtn" data-a="del">删除</button>
       </div>`;
@@ -483,13 +485,13 @@ async function renderHistory() {
     cb.onclick = (e) => e.stopPropagation();
     cb.onchange = () => {
       if (cb.checked) {
-        if (historySel.size >= 2) { cb.checked = false; toast("最多选择两条方案进行比较。", true); return; }
+        if (historySel.size >= 10) { cb.checked = false; toast("最多选择 10 条方案。", true); return; }
         historySel.add(it.id);
       } else {
         historySel.delete(it.id);
       }
       d.classList.toggle("selected", cb.checked);
-      syncCompareButton();
+      syncHistoryButtons();
     };
     d.querySelector('[data-a="load"]').onclick = () => loadPlan(it.id);
     d.querySelector('[data-a="weigh"]').onclick = () => openWeighingDialog(it.id);
@@ -499,7 +501,7 @@ async function renderHistory() {
       if (!confirm(`删除方案 #${it.id}?`)) return;
       await fetch(`/api/plan/${it.id}`, { method: "DELETE" });
       historySel.delete(it.id);
-      syncCompareButton();
+      syncHistoryButtons();
       renderHistory();
     };
     box.appendChild(d);
@@ -626,6 +628,70 @@ $("btnCompare").onclick = async () => {
   }
 };
 $("btnCloseCompare").onclick = () => $("compareDialog").classList.remove("open");
+
+// ---------------------------------------------------------------------------
+// 批次换装顺序(只读, 基于 2~10 条已保存方案)
+// ---------------------------------------------------------------------------
+$("btnBatch").onclick = async () => {
+  const n = historySel.size;
+  if (n < 2 || n > 10) return;
+  try {
+    const resp = await fetch("/api/plans/batch-sequence", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ plan_ids: [...historySel] }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || "批次换装规划失败");
+    renderBatch(data);
+    $("batchDialog").classList.add("open");
+  } catch (e) {
+    toast(e.message, true);
+  }
+};
+$("btnCloseBatch").onclick = () => $("batchDialog").classList.remove("open");
+
+function renderBatch(d) {
+  const body = $("batchBody");
+  const tie = d.optimal_order_count > 1
+    ? `达到最小总操作数的执行次序共 <b>${d.optimal_order_count}</b> 条, 已按方案 ID 序列升序裁决。`
+    : "达到最小总操作数的执行次序唯一。";
+  const head = `<div class="cmp-ok">从<b>空转子</b>开始执行 <b>${d.plan_count}</b> 个批次,
+      总操作数 <b>${d.total_operations}</b> 次(每卸下或装入一支试管各计 1 次)。</div>
+    <div class="wc-note">${tie} 转子: R=${fmt(d.rotor.radius_mm, 1)} mm · ${d.rotor.slot_count} 槽。</div>`;
+  const orderLine = `<div class="rowline" style="flex-wrap:wrap;gap:6px;margin:4px 0 8px">
+    <span class="small">执行次序:</span>
+    ${d.plans.map((p, i) => `${i ? '<span class="muted">→</span>' : ""}
+      <span class="badge">#${p.id} ${p.name}(${p.tube_count} 管)</span>`).join("")}
+    </div>`;
+  const tubeTable = (rows) => `
+      <table class="cmp-table">
+        <thead><tr><th>试管</th><th>质量(g)</th><th>槽位</th></tr></thead>
+        <tbody>${rows.map((t) => `<tr><td>${t.tube_id}</td><td>${t.mass}</td>
+          <td>${t.slot} <span class="small">(${t.angle === null || t.angle === undefined ? "–" : fmt(t.angle, 1) + "°"})</span></td></tr>`).join("")}</tbody>
+      </table>`;
+  const batches = d.batches.map((b) => {
+    const unloadHtml = b.unload.length
+      ? tubeTable(b.unload)
+      : `<p class="muted">${b.seq === 1 ? "空转子起步, 无需卸下。" : "无(上一批次的试管全部保留)。"}</p>`;
+    const loadHtml = b.load.length ? tubeTable(b.load) : '<p class="muted">无需装入。</p>';
+    const kept = b.kept_count
+      ? `<div class="small" style="margin-top:5px">保留不动 ${b.kept_count} 支(不计操作):
+          ${b.kept.map((t) => `试管 ${t.tube_id}@槽 ${t.slot}`).join("、")}</div>`
+      : "";
+    return `<div class="reason" style="border-left-color:var(--acc2)">
+      <div class="rhead">批次 ${b.seq} · 方案 #${b.plan_id} ${b.plan_name}
+        <span class="badge">本次 ${b.operations} 次(卸 ${b.unload_count} + 装 ${b.load_count})</span>
+        <span class="badge">累计 ${b.cumulative_operations} / ${d.total_operations}</span></div>
+      <div class="cmp-grid">
+        <div class="cmp-col"><h3>① 卸下清单(${b.unload_count})</h3>${unloadHtml}</div>
+        <div class="cmp-col"><h3 class="b">② 装入清单(${b.load_count})</h3>${loadHtml}</div>
+      </div>
+      ${kept}
+    </div>`;
+  }).join("");
+  body.innerHTML = head + orderLine + batches +
+    `<div class="small" style="margin-top:6px">${d.method}。${d.note}</div>`;
+}
 
 async function loadPlan(id) {
   const resp = await fetch(`/api/plan/${id}`);

@@ -479,4 +479,88 @@ perf["slots"]=[{"index":i,"angle":i*30,"enabled":True} for i in range(12)]
 rp=call("POST","/api/plan",perf)
 assert rp["result"]["metrics"]["u1_mag_g_mm"]<1e-6
 print("perfect balance U1=0 OK")
+
+# ---- 批次换装顺序(只读, Held-Karp 精确求序) ----
+import itertools as _it
+
+def bs_call(ids):
+    found = find("POST", "/api/plans/batch-sequence")
+    fn, args = (found if isinstance(found, tuple) else (found, ()))
+    return fn(*args, types.SimpleNamespace(plan_ids=list(ids)))
+
+def _occ_map(plan):
+    return {int(p["slot"]): int(p["tube_id"])
+            for p in plan["result"]["placements"] if p["slot"] is not None}
+
+def _brute_batch(plans):
+    """全排列参考: (最小总操作数, 升序裁决后的方案 ID 序列)。"""
+    occ=[_occ_map(p) for p in plans]
+    ids=[p["id"] for p in plans]
+    best=None; seq=None
+    for perm in _it.permutations(range(len(plans))):
+        total=0; prev={}
+        for i in perm:
+            cur=occ[i]
+            keep=sum(1 for s,t in prev.items() if cur.get(s)==t)
+            total+=len(prev)+len(cur)-2*keep
+            prev=cur
+        s=tuple(ids[i] for i in perm)
+        if best is None or total<best:
+            best,seq=total,s
+        elif total==best:
+            seq=min(seq,s)
+    return best,list(seq)
+
+def _check_batch(ids):
+    plans=[call("GET",f"/api/plan/{i}") for i in ids]
+    r=bs_call(ids)
+    best,seq=_brute_batch(plans)
+    assert r["total_operations"]==best,(r["total_operations"],best)
+    assert r["order"]==seq,(r["order"],seq)
+    assert r["plan_count"]==len(ids)
+    assert r["batches"][0]["unload"]==[]          # 空转子起步
+    assert r["batches"][-1]["cumulative_operations"]==best
+    assert sum(b["operations"] for b in r["batches"])==best
+    cum=0
+    for b in r["batches"]:
+        assert b["operations"]==b["unload_count"]+b["load_count"]
+        assert b["unload_count"]==len(b["unload"])
+        assert b["load_count"]==len(b["load"])
+        cum+=b["operations"]
+        assert b["cumulative_operations"]==cum
+    return r
+
+# plan#2/#3 同几何(槽6禁用, R=100); 再存一条同几何不同布局的方案
+b5=dict(req_body); b5["name"]="批次第三方案"; b5["seed"]=777
+rec5=call("POST","/api/plan",b5)
+m2=call("GET","/api/plan/2")["result"]["metrics"]["u1_mag_g_mm"]
+bs2=_check_batch([3,2])            # 传入顺序打乱, 结果应与暴力枚举一致
+bs3=_check_batch([rec5["id"],3,2])
+print("batch-sequence [2,3] total=%d order=%s; [2,3,%d] total=%d order=%s OK" % (
+    bs2["total_operations"],bs2["order"],rec5["id"],
+    bs3["total_operations"],bs3["order"]))
+
+# 拒绝: 几何不一致(plan#4 全槽启用) / 数量不足 / 重复 ID
+for bad_ids in ([2,4],[2],[2,2],[2,3,2]):
+    try:
+        bs_call(bad_ids); raise SystemExit("should 400")
+    except main.HTTPException as e:
+        assert e.status_code==400,(bad_ids,e)
+# 方案不存在 -> 404
+try:
+    bs_call([2,999]); raise SystemExit("should 404")
+except main.HTTPException as e:
+    assert e.status_code==404
+# 同编号试管质量不一致 -> 400
+b6=dict(req_body); b6["name"]="质量冲突方案"
+b6["tubes"]=[dict(t) for t in req_body["tubes"]]
+b6["tubes"][0]["mass"]=99.0       # 试管 1 原 50 g
+rec6=call("POST","/api/plan",b6)
+try:
+    bs_call([2,rec6["id"]]); raise SystemExit("should 400")
+except main.HTTPException as e:
+    assert e.status_code==400 and "质量" in str(e.detail)
+# 只读: 规划后原方案指标不变
+assert call("GET","/api/plan/2")["result"]["metrics"]["u1_mag_g_mm"]==m2
+print("batch-sequence validation/read-only OK")
 print("BACKEND SMOKE TESTS PASS")
