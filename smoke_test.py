@@ -453,9 +453,96 @@ print("vibration-calibration best slot=%s mass=%s residual=%.4f OK" % (
     vc["best"]["slot"], vc["best"]["mass_g"], vc["best"]["predicted"]["amplitude"]))
 
 
+# ---- 批次换装顺序(只读, 空转子起点, 精确最少操作数) ----
+def co_call(ids):
+    fn, _ = find("POST", "/api/plans/changeover-sequence")
+    return fn(types.SimpleNamespace(plan_ids=list(ids)))
+
+import itertools as _it
+def _plmap(rec):
+    return {p["tube_id"]: p["slot"] for p in rec["result"]["placements"]}
+def _brute(recs):
+    ids = [r["id"] for r in recs]
+    pl = {r["id"]: _plmap(r) for r in recs}
+    best, bseq, cnt = None, None, 0
+    for perm in _it.permutations(ids):
+        c = len(pl[perm[0]])
+        for a, b in zip(perm, perm[1:]):
+            keep = sum(1 for t, s in pl[a].items() if pl[b].get(t) == s)
+            c += len(pl[a]) + len(pl[b]) - 2 * keep
+        if best is None or c < best:
+            best, bseq, cnt = c, perm, 1
+        elif c == best:
+            cnt += 1
+            bseq = min(bseq, perm)
+    return best, list(bseq), cnt
+
+full1 = call("GET", "/api/plan/1")
+full2 = call("GET", "/api/plan/2")
+full3 = call("GET", "/api/plan/3")
+# plan1/2/3 同几何(半径/槽位角度/启用), 同编号试管质量一致 -> 兼容
+for ids in ([1, 2], [1, 2, 3], [3, 1, 2]):
+    co = co_call(ids)
+    bt, bs, bc = _brute([call("GET", f"/api/plan/{i}") for i in ids])
+    assert co["total_operations"] == bt, (ids, co["total_operations"], bt)
+    assert co["order"] == bs, (ids, co["order"], bs)          # 同成本按 ID 升序
+    assert co["optimal_sequence_count"] == bc
+    assert co["tie_broken"] == (bc > 1)
+    # 逐批: 首批无卸下(空转子起点); 卸+装=本批; 累计=总数
+    assert co["steps"][0]["unload"] == []
+    for s in co["steps"]:
+        assert s["unload_count"] + s["load_count"] == s["operations"]
+        assert len(s["unload"]) == s["unload_count"]
+        assert len(s["load"]) == s["load_count"]
+    assert co["steps"][-1]["cumulative_operations"] == co["total_operations"]
+    assert sum(s["operations"] for s in co["steps"]) == co["total_operations"]
+    # 逐批换装后转子状态应等于该方案摆放
+    cur = {}
+    for s in co["steps"]:
+        for u in s["unload"]:
+            assert cur.pop(u["tube_id"]) == u["from_slot"]
+        for u in s["load"]:
+            cur[u["tube_id"]] = u["to_slot"]
+        assert cur == _plmap(call("GET", f"/api/plan/{s['plan_id']}"))
+print("changeover-sequence exact/steps OK: order=%s total=%d" % (
+    co["order"], co["total_operations"]))
+
+# 校验错误: 数量越界 / 重复 ID -> 400; 方案不存在 -> 404
+for bad_ids in ([1], list(range(1, 12)), [1, 1]):
+    try:
+        co_call(bad_ids); raise SystemExit("should 400")
+    except main.HTTPException as e:
+        assert e.status_code == 400, (bad_ids, e.status_code)
+try:
+    co_call([1, 999]); raise SystemExit("should 404")
+except main.HTTPException as e:
+    assert e.status_code == 404
+print("changeover-sequence validation OK")
+
 # 列表 / 详情 / 导出 / 删除
 lst=call("GET","/api/plans")
 assert len(lst["items"])==3
+
+# 兼容性拒绝: 半径不同 / 同编号试管质量不同 -> 400(结果只读, 方案不被修改)
+bad_radius = dict(req_body); bad_radius["name"] = "半径不同"
+bad_radius["radius_mm"] = 120.0
+rec4 = call("POST", "/api/plan", bad_radius)
+bad_mass = dict(req_body); bad_mass["name"] = "质量冲突"
+bad_mass["tubes"] = [dict(t) for t in req_body["tubes"]]
+bad_mass["tubes"][0]["mass"] = 55.0
+rec5 = call("POST", "/api/plan", bad_mass)
+for bad_ids in ([1, rec4["id"]], [1, rec5["id"]]):
+    try:
+        co_call(bad_ids); raise SystemExit("should 400")
+    except main.HTTPException as e:
+        assert e.status_code == 400, (bad_ids, e.status_code)
+        print("changeover incompatible 400 OK:", e.detail)
+# 只读: 规划调用后原方案指标与摆放不变
+assert call("GET", "/api/plan/1")["result"]["metrics"]["u1_mag_g_mm"] == nom_u1
+assert _plmap(call("GET", "/api/plan/1")) == _plmap(full1)
+call("DELETE", f"/api/plan/{rec4['id']}")
+call("DELETE", f"/api/plan/{rec5['id']}")
+print("changeover-sequence incompatible/read-only OK")
 detail=call("GET","/api/plan/2")
 assert detail["result"]["total_tubes"]==7
 exp=call("GET","/api/plan/2/export")

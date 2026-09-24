@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from .balancer import run_plan
 from .calibration import predict_single_weight_balancing
+from .changeover import plan_changeover_sequence
 from .compare import compare_plans
 from .weighing import worst_case_u1
 
@@ -90,6 +91,11 @@ class WeighingCheckRequest(BaseModel):
     tube_errors: list[TubeErrorIn] = Field(default_factory=list)
     # 一阶不平衡量限值(g·mm), 以最不利 |U₁| 判定
     u1_limit_g_mm: Optional[float] = Field(default=None, ge=0)
+
+
+class ChangeoverRequest(BaseModel):
+    # 2~10 条已保存方案 ID; 数量/重复/兼容性由规划逻辑统一校验并返回 400
+    plan_ids: list[int] = Field(default_factory=list)
 
 
 class VibrationCalibrationRequest(BaseModel):
@@ -300,6 +306,32 @@ def compare_saved_plans(a: int, b: int) -> dict[str, Any]:
     plan_a = _row_to_plan(_load_plan_row(a))
     plan_b = _row_to_plan(_load_plan_row(b))
     return compare_plans(plan_a, plan_b)
+
+
+@app.post("/api/plans/changeover-sequence")
+def changeover_sequence(req: ChangeoverRequest) -> dict[str, Any]:
+    """批次换装顺序规划(只读): 以空转子为起点, 精确求总装卸操作数最少的执行次序。
+
+    仅接受半径、槽位角度及启用状态相同的方案; 同编号试管质量不一致则拒绝。
+    每次切换先卸下所有不在下一方案原槽位的试管, 再装入下一方案所需试管,
+    每支卸下/装入各计一次操作; Held-Karp 动态规划精确求最少总操作数,
+    同成本按方案 ID 序列升序裁决。逐批返回卸装清单与单次/累计操作数,
+    结果不保存、不修改原方案。
+    """
+    ids = [int(x) for x in req.plan_ids]
+    if not (2 <= len(ids) <= 10):
+        raise HTTPException(
+            status_code=400,
+            detail=f"批次换装需选择 2~10 条已保存方案(当前 {len(ids)} 条)。",
+        )
+    if len(set(ids)) != len(ids):
+        raise HTTPException(status_code=400, detail="所选方案存在重复 ID, 请去除重复。")
+    # 逐个取数, 保证每个 404 信息各自准确
+    plans = [_row_to_plan(_load_plan_row(pid)) for pid in ids]
+    try:
+        return plan_changeover_sequence(plans)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.delete("/api/plan/{plan_id}")

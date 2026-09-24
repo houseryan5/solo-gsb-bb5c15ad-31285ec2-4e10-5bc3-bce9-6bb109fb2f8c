@@ -269,7 +269,8 @@ th{color:var(--mut);font-weight:500}
       <button id="btnCloseHistory" class="ghost">关闭</button></div>
     <div class="rowline" style="margin:8px 0">
       <button id="btnCompare" disabled>比较选中的两条方案</button>
-      <span class="small" id="compareHint">勾选两条方案后可并排比较摆放明细与不平衡量。</span>
+      <button id="btnSequence" disabled>批次换装顺序</button>
+      <span class="small" id="compareHint">勾选 2 条可并排比较; 勾选 2~10 条可规划批次换装顺序。</span>
     </div>
     <div id="historyList" style="margin-top:4px"></div>
   </div>
@@ -280,6 +281,19 @@ th{color:var(--mut);font-weight:500}
     <div class="rowline"><h2 style="margin:0">方案比较</h2><div style="flex:1"></div>
       <button id="btnCloseCompare" class="ghost">关闭</button></div>
     <div id="compareBody" style="margin-top:8px"></div>
+  </div>
+</div>
+
+<div id="sequenceDialog" class="dialog">
+  <div class="box wide">
+    <div class="rowline"><h2 style="margin:0">批次换装顺序</h2><div style="flex:1"></div>
+      <button id="btnCloseSequence" class="ghost">关闭</button></div>
+    <div class="wc-note">以<b>空转子</b>为起点, 精确规划所选方案的执行次序, 使总装卸操作数最少:
+      每批先<b>卸下</b>所有不在下一方案原槽位的试管, 再<b>装入</b>下一方案所需试管,
+      每支卸下/装入各计 1 次操作; 同成本时按方案 ID 序列升序裁决。
+      仅接受半径、槽位角度及启用状态相同的方案, 同编号试管质量必须一致。
+      规划为<b>只读</b>, 结果不保存、不修改任何已保存方案。</div>
+    <div id="sequenceBody" style="margin-top:8px"></div>
   </div>
 </div>
 

@@ -440,11 +440,11 @@ $("btnCopy").onclick = async () => {
 const historySel = new Set();
 
 function syncCompareButton() {
-  const btn = $("btnCompare");
-  btn.disabled = historySel.size !== 2;
+  $("btnCompare").disabled = historySel.size !== 2;
+  $("btnSequence").disabled = historySel.size < 2 || historySel.size > 10;
   $("compareHint").textContent = historySel.size === 0
-    ? "勾选两条方案后可并排比较摆放明细与不平衡量。"
-    : `已选 ${historySel.size} 条(需恰好 2 条)。`;
+    ? "勾选 2 条可并排比较; 勾选 2~10 条可规划批次换装顺序。"
+    : `已选 ${historySel.size} 条(比较需恰好 2 条; 换装顺序需 2~10 条)。`;
 }
 
 $("btnHistory").onclick = async () => {
@@ -476,6 +476,7 @@ async function renderHistory() {
       <div class="rowline">
         <button class="iconbtn" data-a="load">载入</button>
         <button class="iconbtn" data-a="weigh">误差校核</button>
+        <button class="iconbtn" data-a="calib">振动校准</button>
         <button class="iconbtn" data-a="export">导出</button>
         <button class="iconbtn" data-a="del">删除</button>
       </div>`;
@@ -483,7 +484,7 @@ async function renderHistory() {
     cb.onclick = (e) => e.stopPropagation();
     cb.onchange = () => {
       if (cb.checked) {
-        if (historySel.size >= 2) { cb.checked = false; toast("最多选择两条方案进行比较。", true); return; }
+        if (historySel.size >= 10) { cb.checked = false; toast("最多选择 10 条方案。", true); return; }
         historySel.add(it.id);
       } else {
         historySel.delete(it.id);
@@ -626,6 +627,61 @@ $("btnCompare").onclick = async () => {
   }
 };
 $("btnCloseCompare").onclick = () => $("compareDialog").classList.remove("open");
+
+// ---------------------------------------------------------------------------
+// 批次换装顺序(只读, 空转子起点, 精确最少操作数)
+// ---------------------------------------------------------------------------
+$("btnSequence").onclick = async () => {
+  if (historySel.size < 2 || historySel.size > 10) return;
+  try {
+    const resp = await fetch("/api/plans/changeover-sequence", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ plan_ids: [...historySel] }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || "规划失败");
+    renderSequence(data);
+    $("sequenceDialog").classList.add("open");
+  } catch (e) {
+    toast(e.message, true);
+  }
+};
+$("btnCloseSequence").onclick = () => $("sequenceDialog").classList.remove("open");
+
+function seqTubeTable(rows, slotKey, slotLabel) {
+  if (!rows.length) return '<div class="small">无</div>';
+  const body = rows.map((u) =>
+    `<tr><td>${u.tube_id}</td><td>${u.mass ?? "–"}</td><td>${u[slotKey]}</td></tr>`).join("");
+  return `<table class="cmp-table"><thead><tr><th>试管</th><th>质量(g)</th><th>${slotLabel}</th></tr></thead>
+    <tbody>${body}</tbody></table>`;
+}
+
+function renderSequence(d) {
+  const body = $("sequenceBody");
+  const tie = d.tie_broken
+    ? `共 ${d.optimal_sequence_count} 条顺序同达最少操作数, 已按方案 ID 序列升序裁决`
+    : "该顺序为唯一最优";
+  const head = `<div class="cmp-ok">执行顺序: ${d.plans.map((p) => `<b>#${p.id} ${p.name}</b>`).join(" → ")}
+      · 总操作数 <b>${d.total_operations}</b> 次</div>
+    <div class="small" style="margin:4px 0 8px">${tie}; 以空转子为起点, 每批先卸后装,
+      每支卸下/装入各计 1 次操作。</div>`;
+  const steps = d.steps.map((s) => `
+    <div class="reason" style="border-left-color:var(--acc2)">
+      <div class="rhead" style="color:var(--acc2)">第 ${s.seq} 批 · 方案 #${s.plan_id} ${s.plan_name}
+        <span class="pill">本批 ${s.operations} 次</span>
+        <span class="pill">累计 ${s.cumulative_operations} 次</span></div>
+      <div class="cmp-grid">
+        <div><div class="small" style="margin-bottom:3px">① 卸下 ${s.unload_count} 支
+            <span class="small">(不在本方案原槽位的试管)</span></div>
+          ${seqTubeTable(s.unload, "from_slot", "原槽位")}</div>
+        <div><div class="small" style="margin-bottom:3px">② 装入 ${s.load_count} 支
+            <span class="small">(本方案所需试管)</span></div>
+          ${seqTubeTable(s.load, "to_slot", "装入槽位")}</div>
+      </div>
+    </div>`).join("");
+  body.innerHTML = head + steps +
+    `<div class="small" style="margin-top:6px">算法: ${d.method}。结果为只读规划, 未修改任何已保存方案。</div>`;
+}
 
 async function loadPlan(id) {
   const resp = await fetch(`/api/plan/${id}`);
